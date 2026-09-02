@@ -1,0 +1,189 @@
+#!/usr/bin/env python3
+"""mdtool - tools for searching and manipulating markdown files.
+
+Single entry point with subcommands (argparse subparsers) so more tools
+can be added later.
+"""
+
+import argparse
+import os
+import re
+import shutil
+import subprocess
+import sys
+
+# Exit codes
+EXIT_OK = 0
+EXIT_ENV_ERROR = 1
+
+# ANSI colors (used only when stdout is a TTY)
+C_RESET = "\033[0m"
+C_PATH = "\033[35m"      # magenta
+C_LINENO = "\033[32m"    # green
+C_MATCH = "\033[1;31m"   # bold red
+
+# rg default output line: "path:line:text"
+RG_LINE_RE = re.compile(r"^(?P<path>.*?):(?P<lineno>\d+):(?P<text>.*)$")
+
+
+def die_env(message):
+    """Print an environment error and exit with EXIT_ENV_ERROR."""
+    print(f"mdtool: {message}", file=sys.stderr)
+    sys.exit(EXIT_ENV_ERROR)
+
+
+def require_command(name):
+    """Exit with an environment error if an external command is missing."""
+    if shutil.which(name) is None:
+        die_env(f"required command not found: {name}")
+
+
+def color(enabled, code, s):
+    if not enabled:
+        return s
+    return f"{code}{s}{C_RESET}"
+
+
+def run_ripgrep(keyword, directory):
+    """Run ripgrep and return the list of "path:line:text" result lines.
+
+    Returns an empty list when there are no matches. Exits with an
+    environment error when ripgrep itself fails.
+    """
+    cmd = [
+        "rg",
+        "--line-number",
+        "--no-heading",
+        "--color=never",
+        "--",
+        keyword,
+        directory,
+    ]
+    # Matched files may not be UTF-8 (e.g. Shift_JIS markdown); decode
+    # leniently so a single such file does not crash the whole search.
+    proc = subprocess.run(
+        cmd, capture_output=True, encoding="utf-8", errors="replace"
+    )
+    # rg exit codes: 0 = match, 1 = no match, 2 = error
+    if proc.returncode == 2:
+        detail = proc.stderr.strip() or "ripgrep failed"
+        die_env(detail)
+    if proc.returncode == 1:
+        return []
+    return [line for line in proc.stdout.splitlines() if line]
+
+
+def pick_with_fzf(lines):
+    """Pipe result lines through fzf and return the selected line.
+
+    Returns None when the user cancels or selects nothing.
+    """
+    # fzf draws its interactive UI to stderr and reads keys from /dev/tty,
+    # so only stdout (the selection) may be captured. Capturing stderr hides
+    # the UI and makes fzf look like it hangs.
+    proc = subprocess.run(
+        ["fzf", "--no-multi", "--prompt", "mdtool> "],
+        input="\n".join(lines),
+        text=True,
+        stdout=subprocess.PIPE,
+    )
+    # fzf exit codes: 0 = selected, 1 = no match, 130 = interrupted/cancelled
+    if proc.returncode != 0:
+        return None
+    selection = proc.stdout.strip("\n")
+    return selection or None
+
+
+def show_context(result_line, context, use_color):
+    """Print the matched line with surrounding context."""
+    m = RG_LINE_RE.match(result_line)
+    if not m:
+        print(result_line)
+        return
+    path = m.group("path")
+    lineno = int(m.group("lineno"))
+
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            file_lines = f.read().splitlines()
+    except OSError as e:
+        die_env(f"cannot read file: {path}: {e}")
+
+    start = max(1, lineno - context)
+    end = min(len(file_lines), lineno + context)
+    width = len(str(end))
+
+    print(color(use_color, C_PATH, path))
+    for n in range(start, end + 1):
+        text = file_lines[n - 1]
+        num = str(n).rjust(width)
+        if n == lineno:
+            marker = color(use_color, C_LINENO, f"{num}:")
+            print(f"{marker} {color(use_color, C_MATCH, text)}")
+        else:
+            marker = color(use_color, C_LINENO, f"{num}-")
+            print(f"{marker} {text}")
+
+
+def cmd_search(args):
+    require_command("rg")
+    require_command("fzf")
+
+    if not os.path.isdir(args.dir):
+        die_env(f"directory not found: {args.dir}")
+
+    if args.context < 0:
+        die_env("context lines must be >= 0")
+
+    lines = run_ripgrep(args.keyword, args.dir)
+    if not lines:
+        print("no matches", file=sys.stderr)
+        return EXIT_OK
+
+    selection = pick_with_fzf(lines)
+    if selection is None:
+        return EXIT_OK
+
+    show_context(selection, args.context, sys.stdout.isatty())
+    return EXIT_OK
+
+
+def build_parser():
+    parser = argparse.ArgumentParser(
+        prog="mdtool",
+        description="Tools for searching and manipulating markdown files.",
+    )
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    p_search = sub.add_parser(
+        "search",
+        help="ripgrep + fzf search, then show the selected line with context",
+    )
+    p_search.add_argument("keyword", help="keyword passed to ripgrep")
+    p_search.add_argument(
+        "dir",
+        nargs="?",
+        default=".",
+        help="directory to search (default: current directory)",
+    )
+    p_search.add_argument(
+        "-C",
+        "--context",
+        type=int,
+        default=2,
+        metavar="N",
+        help="number of context lines to show around the match (default: 2)",
+    )
+    p_search.set_defaults(func=cmd_search)
+
+    return parser
+
+
+def main(argv=None):
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    return args.func(args)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

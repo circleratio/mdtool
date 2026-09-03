@@ -245,7 +245,7 @@ def show_context(result_line, context, use_color):
 def show_section(result_line, use_color):
     """Print the whole markdown section that contains the matched line.
 
-    Falls back to a plain context view when the file is not markdown.
+    Non-markdown files have no sections, so fall back to a plain context view.
     """
     m = RG_LINE_RE.match(result_line)
     if not m:
@@ -255,10 +255,6 @@ def show_section(result_line, use_color):
     lineno = int(m.group("lineno"))
 
     if os.path.splitext(path)[1].lower() not in MD_EXTENSIONS:
-        print(
-            f"mdtool: not a markdown file, showing context instead: {path}",
-            file=sys.stderr,
-        )
         show_context(result_line, DEFAULT_CONTEXT, use_color)
         return
 
@@ -274,7 +270,7 @@ def cmd_search(args):
     if not os.path.isdir(args.dir):
         die_env(f"directory not found: {args.dir}")
 
-    if args.context < 0:
+    if args.context is not None and args.context < 0:
         die_env("context lines must be >= 0")
 
     if args.tag:
@@ -290,7 +286,10 @@ def cmd_search(args):
         return EXIT_OK
 
     use_color = sys.stdout.isatty()
-    if args.tag or args.section:
+    # Default: show the enclosing markdown section. -C switches to a fixed
+    # context window; non-markdown files fall back to context inside
+    # show_section.
+    if args.context is None:
         show_section(selection, use_color)
     else:
         show_context(selection, args.context, use_color)
@@ -306,7 +305,8 @@ def build_parser():
 
     p_search = sub.add_parser(
         "search",
-        help="ripgrep + fzf search, then show the selected line with context",
+        help="ripgrep + fzf search, then show the selected line's markdown "
+        "section (or context with -C)",
     )
     p_search.add_argument(
         "keyword",
@@ -323,16 +323,10 @@ def build_parser():
         "-C",
         "--context",
         type=int,
-        default=DEFAULT_CONTEXT,
+        default=None,
         metavar="N",
-        help="number of context lines to show around the match (default: 2)",
-    )
-    output.add_argument(
-        "-s",
-        "--section",
-        action="store_true",
-        help="show the whole markdown section containing the selected line "
-        "(markdown files only; falls back to context otherwise)",
+        help="show N context lines around the match instead of the enclosing "
+        "markdown section",
     )
     output.add_argument(
         "-t",

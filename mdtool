@@ -326,6 +326,54 @@ def cmd_distill(args):
     return EXIT_OK
 
 
+def cmd_split(args):
+    path = args.file
+
+    if not os.path.isfile(path):
+        die_env(f"file not found: {path}")
+
+    file_lines = read_file_lines(path)
+    h1_lines = [ln for ln, level in collect_headings(file_lines) if level == 1]
+
+    # One output section per H1 heading. Anything before the first H1 is
+    # folded into the first section so no content is dropped.
+    ranges = []
+    for i, h in enumerate(h1_lines):
+        start = 1 if i == 0 else h
+        end = h1_lines[i + 1] - 1 if i + 1 < len(h1_lines) else len(file_lines)
+        ranges.append((start, end))
+
+    if len(ranges) < 2:
+        print(
+            f"mdtool: nothing to split: {len(ranges)} H1 section(s)",
+            file=sys.stderr,
+        )
+        return EXIT_OK
+
+    base = path
+    for ext in (".markdown", ".md"):
+        if base.lower().endswith(ext):
+            base = base[: -len(ext)]
+            break
+
+    # Pad the sequence number to the digit count of the section total, so
+    # every output file name has the same width.
+    width = len(str(len(ranges)))
+    for idx, (start, end) in enumerate(ranges, start=1):
+        section = file_lines[start - 1:end]
+        while section and not section[-1].strip():
+            section.pop()
+
+        out_path = f"{base}_{idx:0{width}d}.md"
+        try:
+            with open(out_path, "w", encoding="utf-8") as f:
+                f.write("\n".join(section) + "\n")
+        except OSError as e:
+            die_env(f"cannot write file: {out_path}: {e}")
+        print(out_path)
+    return EXIT_OK
+
+
 def build_parser():
     parser = argparse.ArgumentParser(
         prog="mdtool",
@@ -379,6 +427,13 @@ def build_parser():
         help="directory to search (default: current directory)",
     )
     p_distill.set_defaults(func=cmd_distill)
+
+    p_split = sub.add_parser(
+        "split",
+        help="split a markdown file into one file per H1 heading",
+    )
+    p_split.add_argument("file", help="markdown file to split")
+    p_split.set_defaults(func=cmd_split)
 
     return parser
 

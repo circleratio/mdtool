@@ -326,6 +326,14 @@ def cmd_distill(args):
     return EXIT_OK
 
 
+def strip_md_ext(path):
+    """Return path without a trailing .md / .markdown extension."""
+    for ext in (".markdown", ".md"):
+        if path.lower().endswith(ext):
+            return path[: -len(ext)]
+    return path
+
+
 def cmd_split(args):
     path = args.file
 
@@ -350,11 +358,7 @@ def cmd_split(args):
         )
         return EXIT_OK
 
-    base = path
-    for ext in (".markdown", ".md"):
-        if base.lower().endswith(ext):
-            base = base[: -len(ext)]
-            break
+    base = strip_md_ext(path)
 
     # Pad the sequence number to the digit count of the section total, so
     # every output file name has the same width.
@@ -371,6 +375,50 @@ def cmd_split(args):
         except OSError as e:
             die_env(f"cannot write file: {out_path}: {e}")
         print(out_path)
+    return EXIT_OK
+
+
+def cmd_remove(args):
+    path = args.file
+
+    if not os.path.isfile(path):
+        die_env(f"file not found: {path}")
+
+    file_lines = read_file_lines(path)
+    token = f"[{args.tag}]"
+
+    # Collect the line ranges of every section whose heading carries the tag.
+    # Nested and adjacent matches are handled by dropping into a line set.
+    drop = set()
+    matched = 0
+    for lineno, _level in collect_headings(file_lines):
+        if token in file_lines[lineno - 1]:
+            matched += 1
+            start, end = find_section_bounds(file_lines, lineno)
+            drop.update(range(start, end + 1))
+
+    if not matched:
+        print("no matches", file=sys.stderr)
+        return EXIT_OK
+
+    orig_path = f"{strip_md_ext(path)}_orig.md"
+    if os.path.exists(orig_path):
+        die_env(f"backup already exists: {orig_path}")
+
+    kept = [
+        line for n, line in enumerate(file_lines, start=1) if n not in drop
+    ]
+    while kept and not kept[-1].strip():
+        kept.pop()
+
+    try:
+        shutil.copy2(path, orig_path)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("\n".join(kept) + ("\n" if kept else ""))
+    except OSError as e:
+        die_env(f"cannot write file: {e}")
+
+    print(f"removed {matched} section(s); original saved to {orig_path}")
     return EXIT_OK
 
 
@@ -434,6 +482,15 @@ def build_parser():
     )
     p_split.add_argument("file", help="markdown file to split")
     p_split.set_defaults(func=cmd_split)
+
+    p_remove = sub.add_parser(
+        "remove",
+        help="delete every section whose heading carries [tag] from a file "
+        "(original kept as <file>_orig.md)",
+    )
+    p_remove.add_argument("tag", help="tag to match, i.e. headings with [tag]")
+    p_remove.add_argument("file", help="markdown file to edit in place")
+    p_remove.set_defaults(func=cmd_remove)
 
     return parser
 

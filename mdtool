@@ -16,6 +16,12 @@ import sys
 EXIT_OK = 0
 EXIT_ENV_ERROR = 1
 
+# Default number of context lines shown around a match.
+DEFAULT_CONTEXT = 2
+
+# File extensions treated as markdown for the --section option.
+MD_EXTENSIONS = {".md", ".markdown"}
+
 # ANSI colors (used only when stdout is a TTY)
 C_RESET = "\033[0m"
 C_PATH = "\033[35m"      # magenta
@@ -24,6 +30,12 @@ C_MATCH = "\033[1;31m"   # bold red
 
 # rg default output line: "path:line:text"
 RG_LINE_RE = re.compile(r"^(?P<path>.*?):(?P<lineno>\d+):(?P<text>.*)$")
+
+# ATX markdown heading, e.g. "## Title" (allow up to 3 leading spaces).
+ATX_HEADING_RE = re.compile(r"^ {0,3}(#{1,6})(?:\s|$)")
+
+# Fenced code block delimiter, e.g. "```" or "~~~".
+FENCE_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})")
 
 
 def die_env(message):
@@ -73,6 +85,52 @@ def run_ripgrep(keyword, directory):
     return [line for line in proc.stdout.splitlines() if line]
 
 
+def find_markdown_files(directory):
+    """Return markdown file paths under directory, respecting .gitignore.
+
+    Uses ripgrep's file walker so the same ignore rules as `search` apply.
+    """
+    cmd = [
+        "rg",
+        "--files",
+        "--color=never",
+        "-g",
+        "*.md",
+        "-g",
+        "*.markdown",
+        "--",
+        directory,
+    ]
+    proc = subprocess.run(
+        cmd, capture_output=True, encoding="utf-8", errors="replace"
+    )
+    # rg --files exit codes: 0 = files found, 1 = none, 2 = error
+    if proc.returncode == 2:
+        detail = proc.stderr.strip() or "ripgrep failed"
+        die_env(detail)
+    if proc.returncode == 1:
+        return []
+    return [line for line in proc.stdout.splitlines() if line]
+
+
+def collect_tagged_headings(directory, tag):
+    """Return "path:lineno:heading" lines for headings carrying [tag].
+
+    A heading "tag" is any bracketed token in the heading text, e.g. the
+    heading "## Release notes [draft]" carries the tag "draft". Matching is
+    a literal match on "[tag]".
+    """
+    token = f"[{tag}]"
+    results = []
+    for path in find_markdown_files(directory):
+        file_lines = read_file_lines(path)
+        for lineno, _level in collect_headings(file_lines):
+            heading = file_lines[lineno - 1]
+            if token in heading:
+                results.append(f"{path}:{lineno}:{heading}")
+    return results
+
+
 def pick_with_fzf(lines):
     """Pipe result lines through fzf and return the selected line.
 
@@ -94,25 +152,18 @@ def pick_with_fzf(lines):
     return selection or None
 
 
-def show_context(result_line, context, use_color):
-    """Print the matched line with surrounding context."""
-    m = RG_LINE_RE.match(result_line)
-    if not m:
-        print(result_line)
-        return
-    path = m.group("path")
-    lineno = int(m.group("lineno"))
-
+def read_file_lines(path):
+    """Read a file into a list of lines, decoding leniently."""
     try:
         with open(path, "r", encoding="utf-8", errors="replace") as f:
-            file_lines = f.read().splitlines()
+            return f.read().splitlines()
     except OSError as e:
         die_env(f"cannot read file: {path}: {e}")
 
-    start = max(1, lineno - context)
-    end = min(len(file_lines), lineno + context)
-    width = len(str(end))
 
+def print_lines(path, file_lines, start, end, lineno, use_color):
+    """Print file_lines[start-1:end] (1-indexed), highlighting lineno."""
+    width = len(str(end))
     print(color(use_color, C_PATH, path))
     for n in range(start, end + 1):
         text = file_lines[n - 1]
@@ -125,6 +176,97 @@ def show_context(result_line, context, use_color):
             print(f"{marker} {text}")
 
 
+def collect_headings(file_lines):
+    """Return [(lineno, level)] for ATX headings, ignoring fenced code blocks."""
+    headings = []
+    in_fence = False
+    fence_char = ""
+    for i, line in enumerate(file_lines, start=1):
+        fence = FENCE_RE.match(line)
+        if fence:
+            ch = fence.group(1)[0]
+            if not in_fence:
+                in_fence = True
+                fence_char = ch
+            elif ch == fence_char:
+                in_fence = False
+            continue
+        if in_fence:
+            continue
+        heading = ATX_HEADING_RE.match(line)
+        if heading:
+            headings.append((i, len(heading.group(1))))
+    return headings
+
+
+def find_section_bounds(file_lines, lineno):
+    """Return the (start, end) 1-indexed line range of the section holding lineno.
+
+    A section runs from a heading to the line before the next heading of the
+    same or higher level. Lines before the first heading form their own section.
+    """
+    headings = collect_headings(file_lines)
+
+    current = None
+    for hl, level in headings:
+        if hl <= lineno:
+            current = (hl, level)
+        else:
+            break
+
+    if current is None:
+        end = headings[0][0] - 1 if headings else len(file_lines)
+        return 1, max(1, end)
+
+    start, level = current
+    end = len(file_lines)
+    for hl, hlevel in headings:
+        if hl > start and hlevel <= level:
+            end = hl - 1
+            break
+    return start, end
+
+
+def show_context(result_line, context, use_color):
+    """Print the matched line with surrounding context."""
+    m = RG_LINE_RE.match(result_line)
+    if not m:
+        print(result_line)
+        return
+    path = m.group("path")
+    lineno = int(m.group("lineno"))
+
+    file_lines = read_file_lines(path)
+    start = max(1, lineno - context)
+    end = min(len(file_lines), lineno + context)
+    print_lines(path, file_lines, start, end, lineno, use_color)
+
+
+def show_section(result_line, use_color):
+    """Print the whole markdown section that contains the matched line.
+
+    Falls back to a plain context view when the file is not markdown.
+    """
+    m = RG_LINE_RE.match(result_line)
+    if not m:
+        print(result_line)
+        return
+    path = m.group("path")
+    lineno = int(m.group("lineno"))
+
+    if os.path.splitext(path)[1].lower() not in MD_EXTENSIONS:
+        print(
+            f"mdtool: not a markdown file, showing context instead: {path}",
+            file=sys.stderr,
+        )
+        show_context(result_line, DEFAULT_CONTEXT, use_color)
+        return
+
+    file_lines = read_file_lines(path)
+    start, end = find_section_bounds(file_lines, lineno)
+    print_lines(path, file_lines, start, end, lineno, use_color)
+
+
 def cmd_search(args):
     require_command("rg")
     require_command("fzf")
@@ -135,7 +277,10 @@ def cmd_search(args):
     if args.context < 0:
         die_env("context lines must be >= 0")
 
-    lines = run_ripgrep(args.keyword, args.dir)
+    if args.tag:
+        lines = collect_tagged_headings(args.dir, args.keyword)
+    else:
+        lines = run_ripgrep(args.keyword, args.dir)
     if not lines:
         print("no matches", file=sys.stderr)
         return EXIT_OK
@@ -144,7 +289,11 @@ def cmd_search(args):
     if selection is None:
         return EXIT_OK
 
-    show_context(selection, args.context, sys.stdout.isatty())
+    use_color = sys.stdout.isatty()
+    if args.tag or args.section:
+        show_section(selection, use_color)
+    else:
+        show_context(selection, args.context, use_color)
     return EXIT_OK
 
 
@@ -159,20 +308,38 @@ def build_parser():
         "search",
         help="ripgrep + fzf search, then show the selected line with context",
     )
-    p_search.add_argument("keyword", help="keyword passed to ripgrep")
+    p_search.add_argument(
+        "keyword",
+        help="keyword passed to ripgrep (with -t/--tag: the tag name to match)",
+    )
     p_search.add_argument(
         "dir",
         nargs="?",
         default=".",
         help="directory to search (default: current directory)",
     )
-    p_search.add_argument(
+    output = p_search.add_mutually_exclusive_group()
+    output.add_argument(
         "-C",
         "--context",
         type=int,
-        default=2,
+        default=DEFAULT_CONTEXT,
         metavar="N",
         help="number of context lines to show around the match (default: 2)",
+    )
+    output.add_argument(
+        "-s",
+        "--section",
+        action="store_true",
+        help="show the whole markdown section containing the selected line "
+        "(markdown files only; falls back to context otherwise)",
+    )
+    output.add_argument(
+        "-t",
+        "--tag",
+        action="store_true",
+        help="treat the keyword as a tag: collect markdown headings that carry "
+        "[keyword], pick one with fzf, then show that section",
     )
     p_search.set_defaults(func=cmd_search)
 

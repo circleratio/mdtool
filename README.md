@@ -7,11 +7,18 @@
 ## 必要環境
 
 - Python 3（標準ライブラリのみ使用）
-- 外部コマンド
-  - [`rg`（ripgrep）](https://github.com/BurntSushi/ripgrep)
-  - [`fzf`](https://github.com/junegunn/fzf)
+- 外部コマンド（サブコマンドによって要否が異なる）
+  - [`rg`（ripgrep）](https://github.com/BurntSushi/ripgrep) … `search`、`distill`
+  - [`fzf`](https://github.com/junegunn/fzf) … `search`
 
-`rg` または `fzf` が見つからない場合、環境エラー（終了コード 1）で終了します。
+| サブコマンド | `rg` | `fzf` |
+| --- | :---: | :---: |
+| `search` | 必要 | 必要 |
+| `distill` | 必要 | － |
+| `split` | － | － |
+| `remove` | － | － |
+
+必要な外部コマンドが見つからない場合、環境エラー（終了コード 1）で終了します。
 
 ## インストール
 
@@ -23,6 +30,17 @@ ln -s "$PWD/mdtool" ~/.local/bin/mdtool
 ```
 
 ## サブコマンド
+
+| サブコマンド | 概要 |
+| --- | --- |
+| [`search`](#search) | キーワード検索 → `fzf` で選択 → 該当セクション（または前後 N 行）を表示 |
+| [`distill`](#distill) | タグを持つセクションをすべて標準出力に集約 |
+| [`split`](#split) | `#`（H1）見出しの単位でファイルを分割 |
+| [`remove`](#remove) | タグを持つセクションをファイルから削除（元ファイルは `_orig.md` に退避） |
+
+ここでいう「タグ」は、見出しに含まれる `[<文字列>]`（例: `## 設計メモ [draft]` のタグは `draft`）です。
+`distill` / `remove` の照合はいずれも `[tag]` の完全一致（大文字小文字を区別）で、
+コードフェンス内の `#` 行は見出しとみなしません。
 
 ### search
 

@@ -110,7 +110,8 @@ def find_markdown_files(directory):
         die_env(detail)
     if proc.returncode == 1:
         return []
-    return [line for line in proc.stdout.splitlines() if line]
+    # Sort for a stable, path-ordered result (rg's walk order is not defined).
+    return sorted(line for line in proc.stdout.splitlines() if line)
 
 
 def collect_tagged_headings(directory, tag):
@@ -296,6 +297,35 @@ def cmd_search(args):
     return EXIT_OK
 
 
+def cmd_distill(args):
+    require_command("rg")
+
+    if not os.path.isdir(args.dir):
+        die_env(f"directory not found: {args.dir}")
+
+    results = collect_tagged_headings(args.dir, args.tag)
+    if not results:
+        print("no matches", file=sys.stderr)
+        return EXIT_OK
+
+    for i, line in enumerate(results):
+        m = RG_LINE_RE.match(line)
+        path = m.group("path")
+        lineno = int(m.group("lineno"))
+        file_lines = read_file_lines(path)
+        start, end = find_section_bounds(file_lines, lineno)
+
+        section = file_lines[start - 1:end]
+        # Drop trailing blank lines so sections join with a single blank line.
+        while section and not section[-1].strip():
+            section.pop()
+
+        if i > 0:
+            print()
+        print("\n".join(section))
+    return EXIT_OK
+
+
 def build_parser():
     parser = argparse.ArgumentParser(
         prog="mdtool",
@@ -336,6 +366,19 @@ def build_parser():
         "[keyword], pick one with fzf, then show that section",
     )
     p_search.set_defaults(func=cmd_search)
+
+    p_distill = sub.add_parser(
+        "distill",
+        help="print every markdown section carrying [tag], in order, to stdout",
+    )
+    p_distill.add_argument("tag", help="tag to match, i.e. headings with [tag]")
+    p_distill.add_argument(
+        "dir",
+        nargs="?",
+        default=".",
+        help="directory to search (default: current directory)",
+    )
+    p_distill.set_defaults(func=cmd_distill)
 
     return parser
 
